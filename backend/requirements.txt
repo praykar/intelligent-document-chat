@@ -1,0 +1,33 @@
+# FastAPI and web framework dependencies
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+python-multipart==0.0.6
+
+# LangChain for AI/LLM orchestration
+langchain==0.1.0
+langchain-community==0.0.10
+langchain-core==0.1.10
+
+# Vector store dependencies
+chromadb==0.4.18
+faiss-cpu==1.7.4
+
+# Document processing
+pypdf2==3.0.1
+python-docx==1.1.0
+markdown==3.5.1
+
+# Embeddings and LLM providers
+openai==1.6.1
+cohere==4.37
+
+# Data validation and serialization
+pydantic==2.5.2
+pydantic-settings==2.1.0
+
+# Utilities
+python-dotenv==1.0.0
+aiofiles==23.2.1
+
+# Monitoring and logging
+loguru==0.7.2
