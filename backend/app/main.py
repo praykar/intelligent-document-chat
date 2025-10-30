@@ -2,6 +2,10 @@ from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional
+import os
+import shutil
+import tempfile
+from app.services.pdf_chunker import process_pdf
 
 app = FastAPI(
     title="Intelligent Document Chat API",
@@ -32,6 +36,7 @@ class UploadResponse(BaseModel):
     message: str
     document_id: str
     session_id: str
+    num_chunks: int
 
 # Health check endpoint
 @app.get("/")
@@ -44,26 +49,50 @@ async def health_check():
 
 # File upload endpoint
 @app.post("/api/upload", response_model=UploadResponse)
-async def upload_document(file: UploadFile = File(...)):
+async def upload_document(file: UploadFile = File(...), session_id: Optional[str] = None):
     """
     Upload a PDF document for processing.
-    The document will be chunked and stored in a vector database.
+    The document will be extracted, chunked, converted to markdown, and saved to disk.
     """
-    # TODO: Implement document processing logic
-    # - Validate file type (PDF)
-    # - Extract text from PDF
-    # - Chunk text into manageable pieces
-    # - Generate embeddings
-    # - Store in vector database
-    
+    # Validate file type (PDF)
     if not file.filename.endswith('.pdf'):
         raise HTTPException(status_code=400, detail="Only PDF files are supported")
     
-    return UploadResponse(
-        message="Document uploaded successfully (placeholder)",
-        document_id="doc_placeholder_123",
-        session_id="session_placeholder_123"
-    )
+    # Create a temporary file to save the uploaded PDF
+    temp_file = None
+    try:
+        # Create temporary file with PDF extension
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as temp_file:
+            # Save uploaded file to temporary location
+            shutil.copyfileobj(file.file, temp_file)
+            temp_file_path = temp_file.name
+        
+        # Process the PDF: extract text, chunk, convert to markdown, and save
+        document_id, returned_session_id, num_chunks, file_paths = process_pdf(
+            pdf_path=temp_file_path,
+            session_id=session_id,
+            chunk_size=1000,
+            overlap=200,
+            base_dir="backend/app/chunks"
+        )
+        
+        return UploadResponse(
+            message=f"Document uploaded and processed successfully. {num_chunks} chunks created.",
+            document_id=document_id,
+            session_id=returned_session_id,
+            num_chunks=num_chunks
+        )
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error processing PDF: {str(e)}")
+    
+    finally:
+        # Clean up temporary file
+        if temp_file and os.path.exists(temp_file_path):
+            try:
+                os.unlink(temp_file_path)
+            except:
+                pass
 
 # Chat endpoint
 @app.post("/api/chat", response_model=ChatResponse)
