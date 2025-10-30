@@ -6,6 +6,8 @@ import os
 import shutil
 import tempfile
 from app.services.pdf_chunker import process_pdf
+from app.agents.orchestrator import ChatOrchestrator
+from app.vectorstore.chroma_store import ChromaVectorStore
 
 app = FastAPI(
     title="Intelligent Document Chat API",
@@ -22,21 +24,47 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Global instances
+chat_orchestrator: Optional[ChatOrchestrator] = None
+vector_store: Optional[ChromaVectorStore] = None
+
 # Request/Response Models
 class ChatRequest(BaseModel):
     query: str
     session_id: Optional[str] = None
+    top_k: Optional[int] = 5
 
 class ChatResponse(BaseModel):
     response: str
     session_id: str
     sources: Optional[List[str]] = None
+    rephrased_query: Optional[str] = None
+    followup_questions: Optional[List[str]] = None
+    num_chunks_retrieved: Optional[int] = 0
 
 class UploadResponse(BaseModel):
     message: str
     document_id: str
     session_id: str
     num_chunks: int
+
+# Startup event to initialize agents and vector store
+@app.on_event("startup")
+async def startup_event():
+    """Initialize the chat orchestrator and vector store on startup."""
+    global chat_orchestrator, vector_store
+    
+    try:
+        # Initialize vector store
+        vector_store = ChromaVectorStore()
+        
+        # Initialize chat orchestrator with vector store
+        chat_orchestrator = ChatOrchestrator(vector_store=vector_store)
+        
+        print("✓ Chat orchestrator and vector store initialized successfully")
+    except Exception as e:
+        print(f"⚠ Warning: Could not initialize chat components: {e}")
+        print("  Chat functionality may be limited until vector store is set up")
 
 # Health check endpoint
 @app.get("/")
@@ -76,6 +104,14 @@ async def upload_document(file: UploadFile = File(...), session_id: Optional[str
             base_dir="backend/app/chunks"
         )
         
+        # Add chunks to vector store if available
+        if vector_store:
+            try:
+                vector_store.add_documents_from_session(returned_session_id)
+                print(f"✓ Added {num_chunks} chunks to vector store")
+            except Exception as e:
+                print(f"⚠ Warning: Could not add chunks to vector store: {e}")
+        
         return UploadResponse(
             message=f"Document uploaded and processed successfully. {num_chunks} chunks created.",
             document_id=document_id,
@@ -100,21 +136,57 @@ async def chat(request: ChatRequest):
     """
     Process a user query and return a response.
     Flow:
-    1. Agent 1: Rephrase query with self-validation & reasoning
+    1. Agent 1 (QueryAgent): Rephrase query with validation & reasoning
     2. Fetch relevant context from vector store
-    3. Agent 2: Generate response based on context
+    3. Agent 2 (ResponseAgent): Generate response based on context
     """
-    # TODO: Implement chat logic
-    # - Use Agent 1 to rephrase and understand query
-    # - Retrieve relevant chunks from vector store
-    # - Use Agent 2 to draft response
-    # - Return response with sources
+    global chat_orchestrator
     
-    return ChatResponse(
-        response="This is a placeholder response. Chat logic not yet implemented.",
-        session_id=request.session_id or "session_placeholder_123",
-        sources=[]
-    )
+    # Check if orchestrator is initialized
+    if not chat_orchestrator:
+        raise HTTPException(
+            status_code=503, 
+            detail="Chat service not initialized. Please ensure GEMINI_API_KEY is set."
+        )
+    
+    try:
+        # Process the chat query through the orchestrator
+        result = chat_orchestrator.process_chat(
+            user_query=request.query,
+            top_k=request.top_k or 5
+        )
+        
+        # Handle validation errors
+        if not result.get("success"):
+            raise HTTPException(
+                status_code=400,
+                detail=result.get("error", "Invalid query")
+            )
+        
+        # Extract sources from chunks
+        sources = []
+        for chunk in result.get("chunks", []):
+            metadata = chunk.get("metadata", {})
+            source = metadata.get("source", "Unknown")
+            if source not in sources:
+                sources.append(source)
+        
+        return ChatResponse(
+            response=result.get("response", "No response generated"),
+            session_id=request.session_id or "default_session",
+            sources=sources if sources else None,
+            rephrased_query=result.get("rephrased_query"),
+            followup_questions=result.get("followup_questions"),
+            num_chunks_retrieved=result.get("num_chunks_retrieved", 0)
+        )
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error processing chat request: {str(e)}"
+        )
 
 if __name__ == "__main__":
     import uvicorn
