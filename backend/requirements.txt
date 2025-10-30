@@ -20,6 +20,7 @@ markdown==3.5.1
 # Embeddings and LLM providers
 openai==1.6.1
 cohere==4.37
+sentence-transformers==2.2.2
 
 # Data validation and serialization
 pydantic==2.5.2
