@@ -1,8 +1,11 @@
 import os
 import uuid
-from typing import List, Tuple
+from typing import List, Tuple, Dict, Any
 from PyPDF2 import PdfReader
 import re
+
+from app.vectorstore import VectorStoreManager, EmbeddingGenerator
+
 
 def extract_text_from_pdf(pdf_path: str) -> str:
     """
@@ -22,6 +25,7 @@ def extract_text_from_pdf(pdf_path: str) -> str:
         return text.strip()
     except Exception as e:
         raise Exception(f"Error extracting text from PDF: {str(e)}")
+
 
 def chunk_text(text: str, chunk_size: int = 1000, overlap: int = 200) -> List[str]:
     """
@@ -66,6 +70,7 @@ def chunk_text(text: str, chunk_size: int = 1000, overlap: int = 200) -> List[st
     
     return chunks
 
+
 def convert_to_markdown(chunks: List[str], document_name: str) -> List[str]:
     """
     Convert text chunks to markdown format.
@@ -90,7 +95,13 @@ def convert_to_markdown(chunks: List[str], document_name: str) -> List[str]:
     
     return markdown_chunks
 
-def save_chunks_to_disk(chunks: List[str], document_id: str, session_id: str, base_dir: str = "backend/app/chunks") -> List[str]:
+
+def save_chunks_to_disk(
+    chunks: List[str], 
+    document_id: str, 
+    session_id: str, 
+    base_dir: str = "backend/app/chunks"
+) -> List[str]:
     """
     Save markdown chunks to disk.
     
@@ -121,15 +132,63 @@ def save_chunks_to_disk(chunks: List[str], document_id: str, session_id: str, ba
     
     return file_paths
 
+
+def generate_and_store_embeddings(
+    markdown_chunks: List[str],
+    document_id: str,
+    session_id: str,
+    embedding_generator: EmbeddingGenerator,
+    vector_store: VectorStoreManager
+) -> List[str]:
+    """
+    Generate embeddings for markdown chunks and store them in vector database.
+    
+    Args:
+        markdown_chunks: List of markdown-formatted text chunks
+        document_id: Unique identifier for the document
+        session_id: Session identifier
+        embedding_generator: Instance of EmbeddingGenerator
+        vector_store: Instance of VectorStoreManager
+        
+    Returns:
+        List of vector IDs assigned to stored embeddings
+    """
+    # Generate embeddings for all chunks in bulk
+    embeddings = embedding_generator.generate_embeddings(markdown_chunks)
+    
+    # Prepare metadata for each chunk
+    metadatas = [
+        {
+            'document_id': document_id,
+            'session_id': session_id,
+            'chunk_index': i,
+            'total_chunks': len(markdown_chunks)
+        }
+        for i in range(len(markdown_chunks))
+    ]
+    
+    # Bulk add to vector store
+    vector_ids = vector_store.add_embeddings(
+        embeddings=embeddings,
+        documents=markdown_chunks,
+        metadatas=metadatas
+    )
+    
+    return vector_ids
+
+
 def process_pdf(
     pdf_path: str,
     session_id: str = None,
     chunk_size: int = 1000,
     overlap: int = 200,
-    base_dir: str = "backend/app/chunks"
-) -> Tuple[str, str, int, List[str]]:
+    base_dir: str = "backend/app/chunks",
+    enable_vectorization: bool = True,
+    vector_store_dir: str = "./data/vectorstore"
+) -> Dict[str, Any]:
     """
-    Complete PDF processing pipeline: extract, chunk, convert to markdown, and save.
+    Complete PDF processing pipeline: extract, chunk, convert to markdown, save, 
+    and generate embeddings with vector storage.
     
     Args:
         pdf_path: Path to the PDF file
@@ -137,9 +196,16 @@ def process_pdf(
         chunk_size: Maximum characters per chunk
         overlap: Number of overlapping characters between chunks
         base_dir: Base directory for storing chunks
+        enable_vectorization: Whether to generate embeddings and store in vector DB
+        vector_store_dir: Directory for vector store persistence
         
     Returns:
-        Tuple of (document_id, session_id, number_of_chunks, file_paths)
+        Dictionary containing:
+            - document_id: Unique document identifier
+            - session_id: Session identifier
+            - num_chunks: Number of chunks created
+            - file_paths: List of file paths where chunks were saved
+            - vector_ids: List of vector IDs (if vectorization enabled)
     """
     # Generate IDs
     document_id = str(uuid.uuid4())
@@ -161,4 +227,43 @@ def process_pdf(
     # Save to disk
     file_paths = save_chunks_to_disk(markdown_chunks, document_id, session_id, base_dir)
     
-    return document_id, session_id, len(markdown_chunks), file_paths
+    result = {
+        'document_id': document_id,
+        'session_id': session_id,
+        'num_chunks': len(markdown_chunks),
+        'file_paths': file_paths
+    }
+    
+    # Generate embeddings and store in vector database
+    if enable_vectorization:
+        try:
+            # Initialize embedding generator (auto-detects OpenAI or falls back to SentenceTransformers)
+            embedding_generator = EmbeddingGenerator(provider="auto")
+            
+            # Initialize vector store (prefers ChromaDB, falls back to FAISS)
+            vector_store = VectorStoreManager(
+                persist_directory=vector_store_dir,
+                collection_name="document_chunks",
+                use_chroma=True
+            )
+            
+            # Generate embeddings and store them
+            vector_ids = generate_and_store_embeddings(
+                markdown_chunks=markdown_chunks,
+                document_id=document_id,
+                session_id=session_id,
+                embedding_generator=embedding_generator,
+                vector_store=vector_store
+            )
+            
+            result['vector_ids'] = vector_ids
+            print(f"Successfully stored {len(vector_ids)} embeddings in vector database")
+            
+        except Exception as e:
+            print(f"Warning: Failed to generate/store embeddings: {str(e)}")
+            print("Continuing without vectorization...")
+            result['vector_ids'] = []
+    else:
+        result['vector_ids'] = []
+    
+    return result
